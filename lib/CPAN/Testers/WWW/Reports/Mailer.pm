@@ -4,7 +4,7 @@ use warnings;
 use strict;
 
 use vars qw($VERSION);
-$VERSION = '0.11';
+$VERSION = '0.12';
 
 =head1 NAME
 
@@ -39,6 +39,7 @@ use Compress::Zlib;
 use Config::IniFiles;
 use CPAN::Testers::Common::DBUtils;
 use File::Basename;
+use File::Path;
 use File::Slurp;
 use Getopt::ArgvFile default=>1;
 use Getopt::Long;
@@ -49,13 +50,18 @@ use Template;
 use Time::Piece;
 use version;
 
+use base qw(Class::Accessor::Chained::Fast);
+
 # -------------------------------------
 # Variables
 
-# force default configuration into debug mode
-my %config = (DEBUG => 1);
+# default configuration settings
+my %default = (
+    DEBUG       => 1,
+    logclean    => 0
+);
 
-my (%options,%authors,%prefs,%counts);
+my (%AUTHORS,%PREFS);
 
 use constant    LASTMAIL            => '_lastmail';
 use constant    DAILY_SUMMARY       => 1;
@@ -103,102 +109,144 @@ my %phrasebook = (
     'InsertDistPrefs'   => "INSERT INTO prefs_distributions (pauseid,distribution,ignored,report,grade,tuple,version,patches,perl,platform) VALUES (?,?,0,1,'FAIL','FIRST','LATEST',0,'ALL','ALL')",
 );
 
+#----------------------------------------------------------------------------
+# The Application Programming Interface
+
+__PACKAGE__->mk_accessors(
+    qw( debug logfile logclean tt pause ));
+
 # -------------------------------------
 # The Public Interface Functions
 
-=head1 FUNCTIONS
+=head1 INTERFACE
 
-=head2 Public Interface Functions
+=head2 The Constructor
 
-=over 4
+=over
 
-=item * init_options
+=item * new
 
-=item * check_reports
-
-=item * check_counts
+Instatiates the object CPAN::WWW::Testers. Requires a hash of parameters, with
+'config' being the only mandatory key. Note that 'config' can be anything that
+L<Config::IniFiles> accepts for the I<-file> option.
 
 =back
 
 =cut
 
-sub init_options {
+sub new {
+    my $class = shift;
+    my %hash  = @_;
+
+    my $self = {};
+    bless $self, $class;
+
+    my %options;
     GetOptions( \%options,
         'config=s',
+        'logfile=s',
+        'logclean',
         'debug',
         'help|h',
         'version|v'
     );
 
-    _help(1)    if($options{help});
-    _help(0)    if($options{version});
+    $self->help(1)    if($options{help});
+    $self->help(0)    if($options{version});
 
-    die "Configuration file [$options{config}] not found\n" unless(-f $options{config});
+    # ensure we have a configuration file
+    my $config = $self->_defined_or($options{config}, $hash{config});
+    die "Must specify a configuration file\n"       unless($config);
+    die "Configuration file [$config] not found\n"  unless(-f $config);
 
     # load configuration
-    my $cfg = Config::IniFiles->new( -file => $options{config} );
+    my $cfg = Config::IniFiles->new( -file => $config );
 
     # configure databases
     for my $db (qw(CPANSTATS CPANPREFS)) {
         die "No configuration for $db database\n"   unless($cfg->SectionExists($db));
         my %opts = map {$_ => $cfg->val($db,$_);} qw(driver database dbfile dbhost dbport dbuser dbpass);
-        $options{$db} = CPAN::Testers::Common::DBUtils->new(%opts);
-        die "Cannot configure $db database\n" unless($options{$db});
+        $self->{$db} = CPAN::Testers::Common::DBUtils->new(%opts);
+        die "Cannot configure $db database\n" unless($self->{$db});
     }
 
-    $config{DEBUG} = $options{debug} || $cfg->val('SETTINGS','DEBUG');
+    $self->debug(   $self->_defined_or( $options{debug},    $hash{debug},    $cfg->val('SETTINGS','DEBUG'    ), $default{debug}) );
+    $self->logfile( $self->_defined_or( $options{logfile},  $hash{logfile},  $cfg->val('SETTINGS','logfile'  ) ) );
+    $self->logclean($self->_defined_or( $options{logclean}, $hash{logclean}, $cfg->val('SETTINGS','logclean' ), $default{logclean} ) );
 
-    $options{pause} = download_mailrc();
+    $self->pause (_download_mailrc());
 
     # set up API to Template Toolkit
-    $options{tt} = Template->new(
+    $self->tt( Template->new(
         {
-            #    POST_CHOMP => 1,
-            #    PRE_CHOMP => 1,
-            #    TRIM => 1,
             EVAL_PERL    => 1,
             INCLUDE_PATH => [ 'templates' ],
         }
-    );
+    ));
+
+    return $self;
 }
 
+=head2 Methods
+
+=over
+
+=item * check_reports
+
+=item * check_counts
+
+=item * help
+
+=back
+
+=cut
+
 sub check_reports {
-    my $last_id = int( get_lastid() );
+    my $self = shift;
+    my $last_id = int( $self->_get_lastid() );
     my (%reports,%tvars);
 
+    $self->_log( "INFO: START checking reports\n" );
+    $self->_log( "INFO: last_id=$last_id\n" );
+
     # find all reports since last update
-    my $rows = $options{CPANSTATS}->iterator('hash',$phrasebook{'GetReports'},$last_id);
-    return  unless($rows);
+    my $rows = $self->{CPANSTATS}->iterator('hash',$phrasebook{'GetReports'},$last_id);
+    unless($rows) {
+        $self->_log( "INFO: STOP checking reports\n" );
+        return;
+    }
 
     while( my $row = $rows->()) {
-        $counts{REPORTS}++;
+        $self->_log( "DEBUG: processing report: $row->{id}\n" )    if($self->debug);
+
+        $self->{counts}{REPORTS}++;
         $last_id = $row->{id};
         $row->{state} = uc $row->{state};
-        $counts{$row->{state}}++;
-        my $author = get_author($row->{dist}, $row->{version}) || next;
+        $self->{counts}{$row->{state}}++;
+        my $author = $self->_get_author($row->{dist}, $row->{version}) || next;
 
         $row->{version}  ||= '';
         $row->{platform} ||= '';
         $row->{perl}     ||= '';
 
         # get author preferences
-        my $prefs  = get_prefs($author) || next;
+        my $prefs  = $self->_get_prefs($author) || next;
 
         # do we need to worry about this author?
         if($prefs->{active} == 2) {
-            $counts{NOMAIL}++;
+            $self->{counts}{NOMAIL}++;
             next;
         }
 
         # get distribution preferences
-        $prefs  = get_prefs($author, $row->{dist})    || next;
+        $prefs  = $self->_get_prefs($author, $row->{dist})    || next;
         next    if($prefs->{ignored});
         next    if($prefs->{report} != $REPORT_TYPE);
         next    unless($prefs->{grades}{$row->{state}});
 
         # check whether only first instance required
         if($prefs->{tuple} eq 'FIRST') {
-            my @count = $options{CPANSTATS}->get_query('array',$phrasebook{'GetReportCount'}, $row->{platform}, $row->{perl}, $row->{state}, $row->{id});
+            my @count = $self->{CPANSTATS}->get_query('array',$phrasebook{'GetReportCount'}, $row->{platform}, $row->{perl}, $row->{state}, $row->{id});
             next    if(@count > 1);
         }
 
@@ -209,7 +257,7 @@ sub check_reports {
 
         if($prefs->{version} && $prefs->{version} ne 'ALL') {
             if($prefs->{version} eq 'LATEST') {
-                my @vers = $options{CPANSTATS}->get_query('array',$phrasebook{'GetLatestDistVers'},$row->{dist});
+                my @vers = $self->{CPANSTATS}->get_query('array',$phrasebook{'GetLatestDistVers'},$row->{dist});
                 next    if(@vers && $vers[0]->[0] ne $row->{version});
             } else {
                 $prefs->{version} =~ s/\s*//g;
@@ -251,14 +299,18 @@ sub check_reports {
         push @{$reports{$author}->{dists}{$row->{dist}}->{versions}{$row->{version}}->{platforms}{$row->{platform}}->{perls}{$row->{perl}}->{states}{uc $row->{state}}->{value}}, $row->{id};
     }
 
-    for my $author (keys %reports) {
-        my $pause = $options{pause}->author($author);
+    $self->_log( "DEBUG: processing authors: ".(scalar(keys %reports))."\n" )  if($self->debug);
+
+    for my $author (sort keys %reports) {
+        $self->_log( "DEBUG: $author\n" )   if($self->debug);
+
+        my $pause = $self->pause->author($author);
         $tvars{name}   = $pause ? $pause->name : $author;
         $tvars{author} = $author;
         $tvars{dists}  = ();
 
         # get author preferences
-        my $prefs = get_prefs($author);
+        my $prefs = $self->_get_prefs($author);
 
         # active:
         # 0 - new author, no correspondance
@@ -268,10 +320,18 @@ sub check_reports {
 
         if(!$prefs->{active} || $prefs->{active} == 0) {
             $tvars{subject} = 'Welcome to CPAN Testers';
-            write_mail('notification.eml',\%tvars);
-            $options{CPANPREFS}->do_query($phrasebook{'InsertAuthorLogin'}, time(), $author);
-            $options{CPANPREFS}->do_query($phrasebook{'InsertDistPrefs'}, $author, '-');
+            $self->_write_mail('notification.eml',\%tvars);
+            $self->{counts}{NEWAUTH}++;
+
+            # insert author defaults, however check that they don't already
+            # exists in the system first, in case entries are out of sync.
+            my @auth = $self->{CPANPREFS}->get_query('hash',$phrasebook{'GetAuthorPrefs'}, $author);
+            $self->{CPANPREFS}->do_query($phrasebook{'InsertAuthorLogin'}, time(), $author) unless(@auth);
+            my @dist = $self->{CPANPREFS}->get_query('hash',$phrasebook{'GetDistPrefs'}, $author,'-');
+            $self->{CPANPREFS}->do_query($phrasebook{'InsertDistPrefs'}, $author, '-')  unless(@dist);
         }
+
+        $self->_log( "DEBUG: $author - distributions = ".(scalar(keys %{$reports{$author}->{dists}}))."\n" ) if($self->debug);
 
         my ($reports,@e);
         for my $dist (keys %{$reports{$author}->{dists}}) {
@@ -301,58 +361,46 @@ sub check_reports {
         }
 
         next    unless($reports);
+        if($self->debug)    { $self->_log( "DEBUG: $author - reports = $reports\n" ) }
+        else                { $self->_log( "INFO: $author - dists=".(scalar(keys %{$reports{$author}->{dists}})).", reports=$reports\n" ) }
 
         $tvars{dists}   = \@e;
         $tvars{subject} = 'CPAN Testers Daily Report';
 
-        write_mail('mailer.eml',\%tvars);
+        $self->_write_mail('mailer.eml',\%tvars);
     }
 
-    get_lastid($last_id);
+    $self->_get_lastid($last_id)    unless($self->debug);
+    $self->_log( "INFO: new last_id=$last_id\n" );
+    $self->_log( "INFO: STOP checking reports\n" );
 }
 
 sub check_counts {
-    printf( "COUNT: %s\n", emaildate());
-    printf( "%7s = %6d\n", $_, $counts{$_} )    for(keys %counts);
+    my $self = shift;
+    $self->_log( "INFO: COUNTS:\n" );
+    my @counts = qw(REPORTS PASS FAIL UNKNOWN NA NOMAIL MAILS NEWAUTH GOOD BAD);
+    push @counts, 'TEST'    if($self->debug);
+
+    for(@counts) {
+        $self->{counts}{$_} ||= 0;
+        $self->_log( sprintf "INFO: %7s = %6d\n", $_, $self->{counts}{$_} );
+    }
 }
 
-# -------------------------------------
-# The Internal Interface Functions
-
-=head2 Internal Interface Functions
-
-=over 4
-
-=item * help
-
-=item * get_lastid
-
-=item * get_author
-
-=item * get_prefs
-
-=item * parse_prefs
-
-=item * write_mail
-
-=item * emaildate
-
-=item * download_mailrc
-
-=back
-
-=cut
-
-sub _help {
+sub help {
+    my $self = shift;
     my $full = shift;
 
     if($full) {
         print <<HERE;
 
-Usage: $0 \\
-         [-config=<file>] [-h] [-v]
+Usage: $0 --config=<file> \\
+         [--logfile=<file> [--logclean]] [--debug] [-h] [-v]
 
   --config=<file>   database configuration file
+  --logfile=<file>  log file
+  --logclean        0 = append, 1 = overwrite
+  --debug           debug mode, no mail sent
   -h                this help screen
   -v                program version
 
@@ -364,7 +412,33 @@ HERE
     exit(0);
 }
 
-sub get_lastid {
+#----------------------------------------------------------------------------
+# Internal Methods
+
+=head2 Internal Methods
+
+=over 4
+
+=item * _get_lastid
+
+=item * _get_author
+
+=item * _get_prefs
+
+=item * _parse_prefs
+
+=item * _write_mail
+
+=item * _emaildate
+
+=item * _download_mailrc
+
+=back
+
+=cut
+
+sub _get_lastid {
+    my $self = shift;
     my $id = shift;
 
     overwrite_file( LASTMAIL, 0 ) unless -f LASTMAIL;
@@ -377,32 +451,34 @@ sub get_lastid {
     }
 }
 
-sub get_author {
+sub _get_author {
+    my $self = shift;
     my ($dist,$vers) = @_;
     return  unless($dist && $vers);
 
-    unless($authors{$dist} && $authors{$dist}{$vers}) {
-        my @author = $options{CPANSTATS}->get_query('array',$phrasebook{'GetAuthor'}, $dist, $vers);
-        $authors{$dist}{$vers} = @author ? $author[0]->[0] : undef;
+    unless($AUTHORS{$dist} && $AUTHORS{$dist}{$vers}) {
+        my @author = $self->{CPANSTATS}->get_query('array',$phrasebook{'GetAuthor'}, $dist, $vers);
+        $AUTHORS{$dist}{$vers} = @author ? $author[0]->[0] : undef;
     }
-    return $authors{$dist}{$vers};
+    return $AUTHORS{$dist}{$vers};
 }
 
 
-sub get_prefs {
+sub _get_prefs {
+    my $self = shift;
     my ($author,$dist) = @_;
     my $active = 0;
 
     # get distribution defaults
     if($author && $dist) {
-        if(defined $prefs{$author}{dists}{$dist}) {
-            return $prefs{$author}{dists}{$dist};
+        if(defined $PREFS{$author}{dists}{$dist}) {
+            return $PREFS{$author}{dists}{$dist};
         }
 
-        my @rows = $options{CPANPREFS}->get_query('hash',$phrasebook{'GetDistPrefs'}, $author,$dist);
+        my @rows = $self->{CPANPREFS}->get_query('hash',$phrasebook{'GetDistPrefs'}, $author,$dist);
         if(@rows) {
-            $prefs{$author}{dists}{$dist} = parse_prefs($rows[0]);
-            return $prefs{$author}{dists}{$dist};
+            $PREFS{$author}{dists}{$dist} = $self->_parse_prefs($rows[0]);
+            return $PREFS{$author}{dists}{$dist};
         }
 
         # fall through and assume author defaults
@@ -410,22 +486,22 @@ sub get_prefs {
 
     # get author defaults
     if($author) {
-        if(defined $prefs{$author}{default}) {
-            return $prefs{$author}{default};
+        if(defined $PREFS{$author}{default}) {
+            return $PREFS{$author}{default};
         }
 
-        my @auth = $options{CPANPREFS}->get_query('hash',$phrasebook{'GetAuthorPrefs'}, $author);
+        my @auth = $self->{CPANPREFS}->get_query('hash',$phrasebook{'GetAuthorPrefs'}, $author);
         if(@auth) {
-            $prefs{$author}{default}{active} = $auth[0]->{active} || 0;
+            $PREFS{$author}{default}{active} = $auth[0]->{active} || 0;
 
-            my @rows = $options{CPANPREFS}->get_query('hash',$phrasebook{'GetDefaultPrefs'}, $author);
+            my @rows = $self->{CPANPREFS}->get_query('hash',$phrasebook{'GetDefaultPrefs'}, $author);
             if(@rows) {
-                $prefs{$author}{default} = parse_prefs($rows[0]);
-                $prefs{$author}{default}{active} = $rows[0]->{active} || 0;
-                return $prefs{$author}{default};
+                $PREFS{$author}{default} = $self->_parse_prefs($rows[0]);
+                $PREFS{$author}{default}{active} = $rows[0]->{active} || 0;
+                return $PREFS{$author}{default};
             } else {
-                $options{CPANPREFS}->do_query($phrasebook{'InsertDistPrefs'}, $author, '-');
-                $active = $prefs{$author}{default}{active};
+                $self->{CPANPREFS}->do_query($phrasebook{'InsertDistPrefs'}, $author, '-');
+                $active = $PREFS{$author}{default}{active};
             }
         }
 
@@ -444,10 +520,12 @@ sub get_prefs {
             perl        => 'ALL',
             platform    => 'ALL',
         );
+    $PREFS{$author}{dists}{$dist} = \%prefs;
     return \%prefs;
 }
 
-sub parse_prefs {
+sub _parse_prefs {
+    my $self = shift;
     my $row = shift;
     my %hash;
 
@@ -466,48 +544,50 @@ sub parse_prefs {
     return \%hash;
 }
 
-sub write_mail {
-    my ($template,$parms) = @_;
-    my ($text);
+sub _write_mail {
+    my ($self,$template,$parms) = @_;
 
     my $subject = $parms->{subject} || 'CPAN Testers Daily Reports';
-
-    $counts{MAILS}++;
-#print "$parms->{author} - $subject\n";
-#return;
-
-    my $DATE = emaildate();
-    $DATE =~ s/\s+$//;
-
-    $options{tt}->process( $template, $parms, \$text ) || die $options{tt}->error;
-
     my $cmd = qq!| $HOW $parms->{author}\@cpan.org!;
-    my $body = $HEAD . $text;
-    $body =~ s/NAME/$parms->{name}/g;
-    $body =~ s/EMAIL/$parms->{author}\@cpan.org/g;
-    $body =~ s/DATE/$DATE/g;
-    $body =~ s/SUBJECT/$subject/g;
 
-    if($config{DEBUG}) {
-        print "TEST: $parms->{author}\n";
-        return;
-    }
+    $self->{counts}{MAILS}++;
 
-    if(my $fh = IO::File->new($cmd)) {
+    if($self->debug) {
+        $self->_log( "INFO: TEST: $parms->{author}\n" );
+        $self->{counts}{TEST}++;
+
+    } elsif(my $fh = IO::File->new($cmd)) {
+        my $DATE = $self->_emaildate();
+        $DATE =~ s/\s+$//;
+
+        my $text;
+        $self->tt->process( $template, $parms, \$text ) || die $self->tt->error;
+
+        my $body = $HEAD . $text;
+        $body =~ s/NAME/$parms->{name}/g;
+        $body =~ s/EMAIL/$parms->{author}\@cpan.org/g;
+        $body =~ s/DATE/$DATE/g;
+        $body =~ s/SUBJECT/$subject/g;
+
         print $fh $body;
         $fh->close;
-        print "GOOD: $parms->{author}\n";
+        $self->_log( "INFO: GOOD: $parms->{author}\n" );
+        $self->{counts}{GOOD}++;
+
     } else {
-        print "BAD:  $parms->{author}\n";
+        $self->_log( "INFO: BAD:  $parms->{author}\n" );
+        $self->{counts}{BAD}++;
     }
 }
 
-sub emaildate {
+sub _emaildate {
+    my $self = shift;
     my $t = localtime;
     return $t->strftime("%a, %d %b %Y %H:%M:%S +0000");
 }
 
-sub download_mailrc {
+sub _download_mailrc {
+    my $self = shift;
     my $data;
 
     if(-f 'data/01mailrc.txt') {
@@ -531,6 +611,32 @@ sub download_mailrc {
     my $p = Parse::CPAN::Authors->new($data);
     die "Cannot parse data from 01mailrc.txt"   unless($p);
     return $p;
+}
+
+sub _log {
+    my $self = shift;
+    my $log = $self->logfile or return;
+    mkpath(dirname($log))   unless(-f $log);
+
+    my $t = localtime;
+    my $s = $t->strftime("%Y/%m/%d %H:%M:%S");
+
+    my $mode = $self->logclean ? 'w+' : 'a+';
+    $self->logclean(0);
+
+    my $fh = IO::File->new($log,$mode) or die "Cannot write to log file [$log]: $!\n";
+    print $fh "$s: " . join(' ', @_);
+    $fh->close;
+}
+
+sub _defined_or {
+    my $self = shift;
+    while(@_) {
+        my $value = shift;
+        return $value   if(defined $value);
+    }
+
+    return;
 }
 
 1;
@@ -566,7 +672,7 @@ Miss Barbell Productions, L<http://www.missbarbell.co.uk/>
 
 =head1 COPYRIGHT & LICENSE
 
-  Copyright (C) 2008 Barbie for Miss Barbell Productions.
+  Copyright (C) 2008-2009 Barbie for Miss Barbell Productions.
 
   This module is free software; you can redistribute it and/or
   modify it under the same terms as Perl itself.
