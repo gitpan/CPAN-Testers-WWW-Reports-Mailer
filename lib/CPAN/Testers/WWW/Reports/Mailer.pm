@@ -4,7 +4,7 @@ use warnings;
 use strict;
 
 use vars qw($VERSION);
-$VERSION = '0.26';
+$VERSION = '0.27';
 
 =head1 NAME
 
@@ -128,6 +128,7 @@ then will automatically reset to 0, so as to append any further messages.
 use Compress::Zlib;
 use Config::IniFiles;
 use CPAN::Testers::Common::DBUtils;
+use CPAN::Testers::Common::Utils    qw(guid_to_nntp);
 use Email::Address;
 use Email::Simple;
 use File::Basename;
@@ -208,11 +209,11 @@ my %phrasebook = (
 
     'FindAuthorType'    => "SELECT pauseid FROM prefs_distributions WHERE report = ?",
 
-    'GetReports'        => "SELECT id,dist,version,platform,perl,state FROM cpanstats WHERE id > ? AND state IN ('pass','fail','na','unknown') ORDER BY id",
-    'GetReports2'       => "SELECT c.id,c.dist,c.version,c.platform,c.perl,c.state FROM cpanstats AS c INNER JOIN ixlatest AS x ON x.dist=c.dist WHERE c.id > ? AND c.state IN ('pass','fail','na','unknown') AND author IN (%s) ORDER BY id",
+    'GetReports'        => "SELECT id,guid,dist,version,platform,perl,state FROM cpanstats WHERE id > ? AND state IN ('pass','fail','na','unknown') ORDER BY id",
+    'GetReports2'       => "SELECT c.id,c.guid,c.dist,c.version,c.platform,c.perl,c.state FROM cpanstats AS c INNER JOIN ixlatest AS x ON x.dist=c.dist WHERE c.id > ? AND c.state IN ('pass','fail','na','unknown') AND author IN (%s) ORDER BY c.id",
     'GetReportCount'    => "SELECT id FROM cpanstats WHERE platform=? AND perl=? AND state=? AND id < ? AND dist=? AND version=? LIMIT 2",
-    'GetLatestDistVers' => "SELECT version FROM cpanstats WHERE dist=? AND state='cpan' ORDER BY id DESC LIMIT 1",
-    'GetAuthor'         => "SELECT tester FROM cpanstats WHERE dist=? AND version=? AND state='cpan' LIMIT 1",
+    'GetLatestDistVers' => "SELECT version FROM uploads WHERE dist=? ORDER BY released DESC LIMIT 1",
+    'GetAuthor'         => "SELECT author FROM uploads WHERE dist=? AND version=? LIMIT 1",
 
     'GetAuthorPrefs'    => "SELECT * FROM prefs_authors WHERE pauseid=?",
     'GetDefaultPrefs'   => "SELECT * FROM prefs_authors AS a INNER JOIN prefs_distributions AS d ON d.pauseid=a.pauseid AND d.distribution='-' WHERE a.pauseid=?",
@@ -222,7 +223,9 @@ my %phrasebook = (
 
     'GetArticle'        => "SELECT * FROM articles WHERE id=?",
 
-    'GetReportTest'     => "SELECT id,dist,version,platform,perl,state FROM cpanstats WHERE id = ? AND state IN ('pass','fail','na','unknown') ORDER BY id",
+    'GetReportTest'     => "SELECT id,guid,dist,version,platform,perl,state FROM cpanstats WHERE id = ? AND state IN ('pass','fail','na','unknown') ORDER BY id",
+
+    'GetMetabaseByGUID' => 'SELECT * FROM metabase.metabase WHERE guid=?'
 );
 
 #----------------------------------------------------------------------------
@@ -354,7 +357,7 @@ sub check_reports {
         $self->_log( "DEBUG: dist: $row->{dist} $row->{version} $row->{state}\n" )    if($self->verbose);
 
         my $author = $self->_get_author($row->{dist}, $row->{version});
-        $self->_log( "DEBUG: author: $author\n" )    if($self->verbose);
+        $self->_log( "DEBUG: author: ".($author||'')."\n" )    if($self->verbose);
         next    unless($author);
 
         unless($author) {
@@ -427,6 +430,7 @@ sub check_reports {
         if($row->{perl} && $prefs->{perl} && $prefs->{perl} ne 'ALL') {
             my $perlv = $row->{perl};
             $perlv = $row->{perl};
+            $perlv =~ s/\s.*//;
 
             $prefs->{perl} =~ s/\s*//g;
             $prefs->{perl} =~ s/,/|/g;
@@ -444,7 +448,7 @@ sub check_reports {
 
         # Check whether patches are required.
         $self->_log( "DEBUG: dist prefs: patches=$prefs->{patches}, row perl $row->{perl}\n" )    if($self->verbose);
-        next    if(!$prefs->{patches} && $row->{perl} =~ /patch/);
+        next    if(!$prefs->{patches} && $row->{perl} =~ /(RC\d+|patch)/);
 
         # check whether only first instance required
         if($prefs->{tuple} eq 'FIRST') {
@@ -460,12 +464,15 @@ sub check_reports {
             $self->_send_report($author,$row);
         }
 
-        push @{$reports{$author}->{dists}{$row->{dist}}->{versions}{$row->{version}}->{platforms}{$row->{platform}}->{perls}{$row->{perl}}->{states}{uc $row->{state}}->{value}}, $row->{id};
+        push @{$reports{$author}->{dists}{$row->{dist}}->{versions}{$row->{version}}->{platforms}{$row->{platform}}->{perls}{$row->{perl}}->{states}{uc $row->{state}}->{value}}, ($row->{guid} || $row->{id});
     }
+
+    $self->_log( "INFO: STOP checking reports in '$mode' mode\n" );
 
     return $self->_set_lastid()  unless($rows);
 
     if($mode ne 'reports') {
+        $self->_log( "INFO: START parsing data in '$mode' mode\n" );
         $self->_log( "DEBUG: processing authors: ".(scalar(keys %reports))."\n" )  if($self->verbose);
 
         for my $author (sort keys %reports) {
@@ -538,6 +545,8 @@ sub check_reports {
 
             $self->_write_mail('mailer.eml',\%tvars);
         }
+
+        $self->_log( "INFO: STOP parsing data in '$mode' mode\n" );
     }
 
     $self->_set_lastid($last_id);
@@ -772,40 +781,80 @@ sub _parse_prefs {
 
 sub _send_report {
     my ($self,$author,$row) = @_;
+    my %tvars;
 
-    # get article
-    my @rows = $self->{ARTICLES}->get_query('hash',$phrasebook{'GetArticle'}, $row->{id});
+    my $nntpid = guid_to_nntp($row->{guid});
 
-    #$self->_log( "ARTICLE: $row->{id}: $rows[0]->{article}\n" );
+    # old NNTP article lookup
+    if($nntpid) {
+        # get article
+        my @rows = $self->{ARTICLES}->get_query('hash',$phrasebook{'GetArticle'}, $nntpid);
 
-    # disassemble article
-    $rows[0]->{article} = decode_qp($rows[0]->{article})	if($rows[0]->{article} =~ /=3D/);
-    my $mail = Email::Simple->new($rows[0]->{article});
-    return unless $mail;
+        #$self->_log( "ARTICLE: $nntpid: $rows[0]->{article}\n" );
 
-    # get from & subject line
-    my $from    = $mail->header("From");
-    my $subject = $mail->header("Subject");
-    return unless $subject;
+        # disassemble article
+        $rows[0]->{article} = decode_qp($rows[0]->{article})	if($rows[0]->{article} =~ /=3D/);
+        my $mail = Email::Simple->new($rows[0]->{article});
+        return unless $mail;
 
-    my ($address) = Email::Address->parse($from);
-    my $reply = sprintf "%s\@%s", $address->user, $address->host;
+        # get from & subject line
+        my $from    = $mail->header("From");
+        my $subject = $mail->header("Subject");
+        return unless $subject;
 
-    # extract the body
-    my $encoding = $mail->header('Content-Transfer-Encoding');
-    my $body = $mail->body;
-    $body = decode_base64($body)  if($encoding && $encoding eq 'base64');
+        my ($address) = Email::Address->parse($from);
+        my $reply = sprintf "%s\@%s", $address->user, $address->host;
 
-    # set up new mail headers
-    my $pause = $self->pause->author($author);
-    my %tvars = (
-        author  => $author, 
-        name    => ($pause ? $pause->name : $author),
-        subject => $subject,
-        from    => $reply,
-        body    => $body,
-        reply   => $reply
-    );
+        # extract the body
+        my $encoding = $mail->header('Content-Transfer-Encoding');
+        my $body = $mail->body;
+        $body = decode_base64($body)  if($encoding && $encoding eq 'base64');
+
+        # set up new mail headers
+        my $pause = $self->pause->author($author);
+        %tvars = (
+            author  => $author, 
+            name    => ($pause ? $pause->name : $author),
+            subject => $subject,
+            from    => $reply,
+            body    => $body,
+            reply   => $reply
+        );
+
+    # new Metabase lookup
+    } else {
+        my @rows = $self->{CPANSTATS}->GetQuery('hash',$phrasebook{'GetMetabaseByGUID'},$row->{guid});
+        return  unless(@rows);
+
+        my $data = decode_json($rows[0]->{report});
+        my $fact = CPAN::Testers::Fact::LegacyReport->from_struct( $data->{'CPAN::Testers::Fact::LegacyReport'} );
+        my $body = $fact->{content}{textreport};
+
+        my $report = CPAN::Testers::Fact::TestSummary->from_struct( $data->{'CPAN::Testers::Fact::TestSummary'} );
+        my $state  = uc $report->{content}{grade};
+        my $osname = $report->{content}{osname};
+        my $perl   = $report->{content}{perl_version};
+
+        my $distro = Metabase::Resource->new( $report->{metadata}{core}{resource} );
+        my $dist    = $distro->metadata->{dist_name};
+        my $version = $distro->metadata->{dist_version};
+        my $author  = $distro->metadata->{author};
+
+        my ($tester_name,$tester_email) = get_tester( $report->creator );
+
+        my $subject = sprintf "%s %s-%s %s %s", $state, $dist, $version, $perl, $osname;
+
+        # set up new mail headers
+        my $pause = $self->pause->author($author);
+        %tvars = (
+            author  => $author, 
+            name    => ($pause ? $pause->name : $author),
+            subject => $subject,
+            from    => $tester_email,
+            body    => $body,
+            reply   => $tester_email
+        );
+    }
 
     # send data
     $self->_write_mail('report.eml',\%tvars);
