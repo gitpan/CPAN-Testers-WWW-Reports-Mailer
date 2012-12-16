@@ -1,3 +1,9 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use 5.006;
+
 use ExtUtils::MakeMaker;
 
 print <<HERE;
@@ -8,10 +14,15 @@ print <<HERE;
 HERE
 
 WriteMakefile(
-    'NAME'          => 'CPAN::Testers::WWW::Reports::Mailer',
-    'VERSION_FROM'  => 'lib/CPAN/Testers/WWW/Reports/Mailer.pm',
-    'PREREQ_PM'     => {
+    AUTHOR              => 'Barbie <barbie@cpan.org>',
+    NAME                => 'CPAN::Testers::WWW::Reports::Mailer',
+    VERSION_FROM        => 'lib/CPAN/Testers/WWW/Reports/Mailer.pm',
+    ABSTRACT            => 'CPAN Testers Reports Mailer',
+    NO_META             => 1,
 
+    PREREQ_PM           => {
+
+        # prereqs
         'Compress::Zlib'                    => 0,
         'Config::IniFiles'                  => 0,
         'Class::Accessor::Fast'             => 0,
@@ -20,6 +31,7 @@ WriteMakefile(
         'Email::Address'                    => 0,
         'Email::Simple'                     => 0,
         'File::Basename'                    => 0,
+        'File::Path'                        => 0,
         'File::Slurp'                       => 0,
         'Getopt::ArgvFile'                  => 0,
         'Getopt::Long'                      => 0,
@@ -32,17 +44,17 @@ WriteMakefile(
         'Time::Piece'                       => 0,
         'version'                           => 0,
 
+        'DBI'                               => 0,
         'DBD::mysql'                        => 0,
         'DBD::SQLite'                       => '1.07',
+
+        # build/test prereqs
+        'IO::File'                          => 0,
+        'Test::More'                        => '0.70',
+        'Test::Trap'                        => '0'
 
     },
 
     'INSTALLDIRS'   => 'site',
     'EXE_FILES'     => [ 'bin/cpanreps-mailer' ],
-
-    NO_META             => 1,
-
-    ($] >= 5.005 ?    ## Add these new keywords supported since 5.005
-      (ABSTRACT	=> 'CPAN Testers Reports Mailer',
-       AUTHOR	=> 'Barbie <barbie@cpan.org>') : ()),
 );

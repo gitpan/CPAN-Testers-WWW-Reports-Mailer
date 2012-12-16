@@ -1,31 +1,44 @@
-#!perl
-
+#!/usr/bin/perl -w
 use strict;
-use warnings;
 
+# -------------------------------------------------------------------
+# Library Modules
+
+use lib qw(t/lib);
+use File::Slurp;
 use Test::More tests => 4;
+
 use CPAN::Testers::WWW::Reports::Mailer;
 
-use lib 't';
-use CTWRM_Testing;
+use TestObject;
 
-my $log = 't/_TMPDIR/cpanreps.log';
-unlink $log if(-f $log);
+# -------------------------------------------------------------------
+# Variables
 
-{
-    ok( my $obj = CTWRM_Testing::getObj(), "got object" );
+my $CONFIG  = 't/_DBDIR/preferences.ini';
+my $LOGFILE = 't/_TMPDIR/cpanreps.log';
 
-    ok(!-f $log, 'log not found' );
+# -------------------------------------------------------------------
+# Tests
+
+unlink $LOGFILE if(-f $LOGFILE);
+
+SKIP: {
+    skip "No supported databases available", 4  unless(-f $CONFIG);
+
+    ok( my $obj = TestObject->load(), "got object" );
+
+    ok(!-f $LOGFILE, 'log not found' );
     $obj->check_counts;
-    ok( -f $log, 'log created' );
+    ok( -f $LOGFILE, 'log created' );
 
     my ($counts,@log);
-    open FILE, '<', $obj->logfile;
-    while(<FILE>) {
-        next    unless($counts || /INFO: COUNTS/);
+    my @lines = read_file($LOGFILE);
+    for my $line (@lines) {
+        next    unless($counts || $line =~ /INFO: COUNTS/);
         $counts = 1;
-        chomp;
-        push @log, substr($_,21);
+        $line =~ s/\s+$//;
+        push @log, substr($line,21);
     }
 
     is_deeply(\@log, [

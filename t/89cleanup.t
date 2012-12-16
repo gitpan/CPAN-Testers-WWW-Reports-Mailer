@@ -1,20 +1,31 @@
-#!perl
-
+#!/usr/bin/perl -w
 use strict;
-use warnings;
+
 $|=1;
 
-use Test::More tests => 3;
-use File::Spec;
+# -------------------------------------------------------------------
+# Library Modules
+
 use File::Path;
+use Test::More tests => 4;
 
-# these shouldn't exist ...  whack just to be sure.
-rmtree( File::Spec->catfile('t','_TMPDIR')    );
-rmtree( File::Spec->catfile('t','_DBDIR')    );
-rmtree( File::Spec->catfile('t','_EXPECTED') );
+# -------------------------------------------------------------------
+# Tests
 
-# triple check
-ok( ! -d File::Spec->catfile('t','_TMPDIR'),   '_TMPDIR removed'   );
-ok( ! -d File::Spec->catfile('t','_DBDIR'),    '_DBDIR removed'    );
-ok( ! -d File::Spec->catfile('t','_EXPECTED'), '_EXPECTED removed' );
+eval "use Test::Database";
+my $notd = $@ ? 1 : 0;
+
+unless($notd) {
+    my $td;
+    if($td = Test::Database->handle( 'mysql' )) {
+        $td->{driver}->drop_database($td->name);
+    } elsif($td = Test::Database->handle( 'SQLite' )) {
+        $td->{driver}->drop_database($td->name);
+    }
+}
+
+for my $d ('t/_DBDIR','t/_TMPDIR') {
+    ok( rmtree( $d ), "removed '$d'" );
+    ok( ! -d $d,      "removed '$d' verified" );
+}
 

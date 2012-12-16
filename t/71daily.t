@@ -1,12 +1,26 @@
-#!perl
-
+#!perl -w
 use strict;
-use warnings;
+
 $|=1;
 
-use Test::More tests => 47;
-use lib 't';
-use lib qw(./lib ../lib);
+# -------------------------------------------------------------------
+# Library Modules
+
+use lib qw(t/lib);
+use File::Slurp;
+use File::Path;
+use File::Basename;
+use Test::More;
+
+use CPAN::Testers::WWW::Reports::Mailer;
+
+use TestEnvironment;
+use TestObject;
+
+# -------------------------------------------------------------------
+# Variables
+
+my $TESTS = 47;
 
 my %COUNTS = (
     REPORTS => 777,
@@ -22,11 +36,15 @@ my %COUNTS = (
     TEST    => 1
 );
 
-use CTWRM_Testing;
-use CPAN::Testers::WWW::Reports::Mailer;
-use File::Slurp;
-use File::Path;
-use File::Basename;
+my @DATA = (
+    'auth|DCANTRELL|3|1248533160',
+    'dist|DCANTRELL|-|0|1|FAIL,UNKNOWN|FIRST|LATEST|1|ALL|ALL',
+    'dist|DCANTRELL|Acme-Licence|1|1|FAIL|FIRST|LATEST|0|ALL|ALL',
+    'dist|DCANTRELL|Acme-Pony|1|1|FAIL|FIRST|LATEST|0|ALL|ALL',
+    'dist|DCANTRELL|Acme-Scurvy-Whoreson-BilgeRat|1|1|FAIL|FIRST|LATEST|0|ALL|ALL',
+    'dist|DCANTRELL|Bryar|1|1|FAIL|FIRST|LATEST|0|ALL|ALL',
+    'dist|DCANTRELL|Pony|1|1|FAIL|FIRST|LATEST|0|ALL|ALL'
+);
 
 my %files = (
     'lastmail' => 't/_TMPDIR/test-lastmail.txt',
@@ -34,55 +52,62 @@ my %files = (
     'mailfile' => 'mailer-debug.log'
 );
 
+my $CONFIG = 't/_DBDIR/preferences-daily.ini';
+
+# -------------------------------------------------------------------
+# Tests
+
 for(keys %files) {
     unlink $files{$_}   if(-f $files{$_});
 }
 
-my ($pa,$pd) = CTWRM_Testing::prefs_db_init(\*DATA);
-is($pa,1,'author records added');
-is($pd,6,'distro records added');
+my $handles = TestEnvironment::Handles();
+if(!$handles)   { plan skip_all => "Unable to create test environment"; }
+else            { plan tests    => $TESTS }
 
-mkpath(dirname($files{lastmail}));
-overwrite_file($files{lastmail}, 'daily=4587509,weekly=4587509,reports=4587509' );
-run_mailer();
+SKIP: {
+    skip "No supported databases available", $TESTS  unless($handles->{CPANPREFS});
 
-$COUNTS{REPORTS} = 394;
-$COUNTS{PASS}    = 365;
-$COUNTS{FAIL}    = 27;
-$COUNTS{UNKNOWN} = 2;
-overwrite_file($files{lastmail}, 'daily=4722317,weekly=4722317,reports=4722317' );
-run_mailer();
+    my ($pa,$pd) = TestEnvironment::ResetPrefs(\@DATA);
+    is($pa,1,'author records added');
+    is($pd,6,'distro records added');
 
-$COUNTS{MAILS}   = 1;
-$COUNTS{REPORTS} = 286;
-$COUNTS{PASS}    = 262;
-$COUNTS{TEST}    = 1;
-$COUNTS{FAIL}    = 23;
-$COUNTS{UNKNOWN} = 1;
-overwrite_file($files{lastmail}, 'daily=4766000,weekly=4766000,reports=4766000' );
-run_mailer();
+    mkpath(dirname($files{lastmail}));
+    overwrite_file($files{lastmail}, 'daily=4587509,weekly=4587509,reports=4587509' );
+    run_mailer();
 
-$COUNTS{MAILS}   = 1;
-$COUNTS{REPORTS} = 285;
-$COUNTS{FAIL}    = 22;
-overwrite_file($files{lastmail}, 'daily=4766100,weekly=4766100,reports=4766100' );
-run_mailer();
+    $COUNTS{REPORTS} = 394;
+    $COUNTS{PASS}    = 365;
+    $COUNTS{FAIL}    = 27;
+    $COUNTS{UNKNOWN} = 2;
+    overwrite_file($files{lastmail}, 'daily=4722317,weekly=4722317,reports=4722317' );
+    run_mailer();
+
+    $COUNTS{MAILS}   = 1;
+    $COUNTS{REPORTS} = 286;
+    $COUNTS{PASS}    = 262;
+    $COUNTS{TEST}    = 1;
+    $COUNTS{FAIL}    = 23;
+    $COUNTS{UNKNOWN} = 1;
+    overwrite_file($files{lastmail}, 'daily=4766000,weekly=4766000,reports=4766000' );
+    run_mailer();
+
+    $COUNTS{MAILS}   = 1;
+    $COUNTS{REPORTS} = 285;
+    $COUNTS{FAIL}    = 22;
+    overwrite_file($files{lastmail}, 'daily=4766100,weekly=4766100,reports=4766100' );
+    run_mailer();
+
+    my ($mail1,$mail2) = TestObject::mail_check($files{mailfile},'t/data/71daily.eml');
+    is_deeply($mail1,$mail2,'mail files match');
+}
 
 sub run_mailer {
-    my $mailer = CPAN::Testers::WWW::Reports::Mailer->new(config => 't/data/preferences-daily.ini');
-    $mailer->check_reports();
-    $mailer->check_counts();
+    my $mailer = TestObject->load(config => $CONFIG);
+    if($mailer->nomail) {
+        $mailer->check_reports();
+        $mailer->check_counts();
+    }
 
     is($mailer->{counts}{$_},$COUNTS{$_},"Matched count for $_") for(keys %COUNTS);
 }
-
-is(CTWRM_Testing::mail_check($files{mailfile},'t/data/71daily.eml'),1,'mail files match');
-
-__DATA__
-auth|DCANTRELL|3|1248533160
-dist|DCANTRELL|-|0|1|FAIL,UNKNOWN|FIRST|LATEST|1|ALL|ALL
-dist|DCANTRELL|Acme-Licence|1|1|FAIL|FIRST|LATEST|0|ALL|ALL
-dist|DCANTRELL|Acme-Pony|1|1|FAIL|FIRST|LATEST|0|ALL|ALL
-dist|DCANTRELL|Acme-Scurvy-Whoreson-BilgeRat|1|1|FAIL|FIRST|LATEST|0|ALL|ALL
-dist|DCANTRELL|Bryar|1|1|FAIL|FIRST|LATEST|0|ALL|ALL
-dist|DCANTRELL|Pony|1|1|FAIL|FIRST|LATEST|0|ALL|ALL

@@ -1,27 +1,39 @@
-#!perl
-
+#!/usr/bin/perl -w
 use strict;
-use warnings;
 
-use Test::More tests => 21;
-use CPAN::Testers::WWW::Reports::Mailer;
+# -------------------------------------------------------------------
+# Library Modules
+
+use lib qw(t/lib);
 use IO::File;
+use Test::More tests => 21;
 
-use lib 't';
-use CTWRM_Testing;
+use CPAN::Testers::WWW::Reports::Mailer;
 
-my $f = 't/_DBDIR/lastmail';
-unlink $f;
+use TestObject;
 
-{
-    ok( my $obj = CTWRM_Testing::getObj(), "got object" );
+# -------------------------------------------------------------------
+# Variables
 
-    ok($obj->lastmail($f),'reset last mail file');
-    is($obj->lastmail,$f, 'reset last mail');
+my $CONFIG = 't/_DBDIR/preferences.ini';
+my $LASTID = 't/_DBDIR/lastmail';
 
-    ok(!-f $f, 'lastmail not created');
+# -------------------------------------------------------------------
+# Tests
+
+unlink $LASTID;
+
+SKIP: {
+    skip "No supported databases available", 21  unless(-f $CONFIG);
+
+    ok( my $obj = TestObject->load(), "got object" );
+
+    ok($obj->lastmail($LASTID),'reset last mail file');
+    is($obj->lastmail,$LASTID, 'reset last mail');
+
+    ok(!-f $LASTID, 'lastmail not created');
     is($obj->_get_lastid,0, 'new last id');
-    ok(-f $f, 'lastmail now exists');
+    ok(-f $LASTID, 'lastmail now exists');
 
     # defaults to daily mode
     ok($obj->_get_lastid(12), 'set last id - daily mode');

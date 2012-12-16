@@ -4,7 +4,7 @@ use warnings;
 use strict;
 
 use vars qw($VERSION);
-$VERSION = '0.27';
+$VERSION = '0.29';
 
 =head1 NAME
 
@@ -40,15 +40,15 @@ Report and the individual reports will also be available.
 Configuration for this application can occur via the command line, the API and
 the configuration file. Of them all, only the configuration file is required.
 
-The configuration file should be in the INI style, with the sections CPANSTATS
-and CPANPREFS describing the associated database access required. The general
-settings section, SETTINGS, is optional, and can be overridden by the command
-line and the API arguments.
+The configuration file should be in the INI style, with the section CPANPREFS 
+describing the associated database access required. The general settings 
+section, SETTINGS, is optional, and can be overridden by the command line and
+the API arguments.
 
 =head2 Database Configuration
 
-The CPANSTATS and CPANPREFS sections are required, and should contain the
-following key/value pairs to describe access to the specific database.
+The CPANPREFS section is required, and should contain the following key/value 
+pairs to describe access to the specific database.
 
 =over 4
 
@@ -68,6 +68,10 @@ following key/value pairs to describe access to the specific database.
 
 Only 'driver' and 'database' are required for an SQLite database, while the
 other key/values may need to be completed for other databases.
+
+It is now assumed that only one database connection is require, with other
+databases held within the same database application. The primary connection
+must be to the CPAN Preferences databases. The other databases, CPAN Statistics, Articles and Metabase
 
 =head2 General Configuration
 
@@ -203,17 +207,17 @@ my @months = (
         { 'id' => 12, 'value' => "December"   },
 );
 
-my %phrasebook = (
-    'LastReport'        => "SELECT MAX(id) FROM cpanstats",
-    'GetEarliest'       => "SELECT id FROM cpanstats WHERE fulldate > ? ORDER BY id LIMIT 1",
+our %phrasebook = (
+    'LastReport'        => "SELECT MAX(id) FROM cpanstats.cpanstats",
+    'GetEarliest'       => "SELECT id FROM cpanstats.cpanstats WHERE fulldate > ? ORDER BY id LIMIT 1",
 
     'FindAuthorType'    => "SELECT pauseid FROM prefs_distributions WHERE report = ?",
 
-    'GetReports'        => "SELECT id,guid,dist,version,platform,perl,state FROM cpanstats WHERE id > ? AND state IN ('pass','fail','na','unknown') ORDER BY id",
-    'GetReports2'       => "SELECT c.id,c.guid,c.dist,c.version,c.platform,c.perl,c.state FROM cpanstats AS c INNER JOIN ixlatest AS x ON x.dist=c.dist WHERE c.id > ? AND c.state IN ('pass','fail','na','unknown') AND author IN (%s) ORDER BY c.id",
-    'GetReportCount'    => "SELECT id FROM cpanstats WHERE platform=? AND perl=? AND state=? AND id < ? AND dist=? AND version=? LIMIT 2",
-    'GetLatestDistVers' => "SELECT version FROM uploads WHERE dist=? ORDER BY released DESC LIMIT 1",
-    'GetAuthor'         => "SELECT author FROM uploads WHERE dist=? AND version=? LIMIT 1",
+    'GetReports'        => "SELECT id,guid,dist,version,platform,perl,state FROM cpanstats.cpanstats WHERE id > ? AND state IN ('pass','fail','na','unknown') ORDER BY id",
+    'GetReports2'       => "SELECT c.id,c.guid,c.dist,c.version,c.platform,c.perl,c.state FROM cpanstats.cpanstats AS c INNER JOIN ixlatest AS x ON x.dist=c.dist WHERE c.id > ? AND c.state IN ('pass','fail','na','unknown') AND author IN (%s) ORDER BY c.id",
+    'GetReportCount'    => "SELECT id FROM cpanstats.cpanstats WHERE platform=? AND perl=? AND state=? AND id < ? AND dist=? AND version=? LIMIT 2",
+    'GetLatestDistVers' => "SELECT version FROM cpanstats.uploads WHERE dist=? ORDER BY released DESC LIMIT 1",
+    'GetAuthor'         => "SELECT author FROM cpanstats.uploads WHERE dist=? AND version=? LIMIT 1",
 
     'GetAuthorPrefs'    => "SELECT * FROM prefs_authors WHERE pauseid=?",
     'GetDefaultPrefs'   => "SELECT * FROM prefs_authors AS a INNER JOIN prefs_distributions AS d ON d.pauseid=a.pauseid AND d.distribution='-' WHERE a.pauseid=?",
@@ -221,11 +225,12 @@ my %phrasebook = (
     'InsertAuthorLogin' => 'INSERT INTO prefs_authors (active,lastlogin,pauseid) VALUES (1,?,?)',
     'InsertDistPrefs'   => "INSERT INTO prefs_distributions (pauseid,distribution,ignored,report,grade,tuple,version,patches,perl,platform) VALUES (?,?,0,1,'FAIL','FIRST','LATEST',0,'ALL','ALL')",
 
-    'GetArticle'        => "SELECT * FROM articles WHERE id=?",
+    'GetArticle'        => "SELECT * FROM articles.articles WHERE id=?",
 
-    'GetReportTest'     => "SELECT id,guid,dist,version,platform,perl,state FROM cpanstats WHERE id = ? AND state IN ('pass','fail','na','unknown') ORDER BY id",
+    'GetReportTest'     => "SELECT id,guid,dist,version,platform,perl,state FROM cpanstats.cpanstats WHERE id = ? AND state IN ('pass','fail','na','unknown') ORDER BY id",
 
-    'GetMetabaseByGUID' => 'SELECT * FROM metabase.metabase WHERE guid=?'
+    'GetMetabaseByGUID' => 'SELECT * FROM metabase.metabase WHERE guid=?',
+    'GetTestersEmail'   => 'SELECT * FROM metabase.testers_email'
 );
 
 #----------------------------------------------------------------------------
@@ -257,21 +262,25 @@ sub new {
         'mode=s',
         'help|h',
         'version|v'
-    );
+    ) or help(1);
+
+    # default to API settings if no command line option
+    for(qw(config help version)) {
+        $options{$_} ||= $hash{$_}  if(defined $hash{$_});
+    }
 
     $self->help(1)    if($options{help});
     $self->help(0)    if($options{version});
 
     # ensure we have a configuration file
-    my $config = $self->_defined_or($options{config}, $hash{config});
-    die "Must specify a configuration file\n"       unless($config);
-    die "Configuration file [$config] not found\n"  unless(-f $config);
+    die "Must specify a configuration file\n"               unless(   $options{config});
+    die "Configuration file [$options{config}] not found\n" unless(-f $options{config});
 
     # load configuration
-    my $cfg = Config::IniFiles->new( -file => $config );
+    my $cfg = Config::IniFiles->new( -file => $options{config} );
 
     # configure databases
-    for my $db (qw(CPANSTATS CPANPREFS ARTICLES)) {
+    for my $db (qw(CPANPREFS)) {
         die "No configuration for $db database\n"   unless($cfg->SectionExists($db));
         my %opts;
         for my $key (qw(driver database dbfile dbhost dbport dbuser dbpass)) {
@@ -283,7 +292,7 @@ sub new {
     	$self->{db}->{mysql_auto_reconnect} = 1	if($opts{driver} =~ /mysql/i);
     }
 
-    $self->test(    $self->_defined_or( $options{test},     $hash{test},     $cfg->val('SETTINGS','test'  ), 0 ) );
+    $self->test(    $self->_defined_or( $options{test},     $hash{test},     $cfg->val('SETTINGS','test'     ), 0 ) );
     $options{nomail} = 1 if($self->test);
 
     $self->verbose( $self->_defined_or( $options{verbose},  $hash{verbose},  $cfg->val('SETTINGS','verbose'  ), $default{verbose}) );
@@ -314,6 +323,12 @@ sub new {
         }
     ));
 
+    my @testers = $self->{CPANPREFS}->get_query('hash',$phrasebook{'GetTestersEmail'});
+    for my $tester (@testers) {
+        $self->{testers}{$tester->{creator}}{name}  ||= $tester->{fullname};
+        $self->{testers}{$tester->{creator}}{email} ||= $tester->{email};
+    }
+
     return $self;
 }
 
@@ -329,15 +344,15 @@ sub check_reports {
 
     my $next;
     if($self->test) {
-        $next = $self->{CPANSTATS}->iterator('hash',$phrasebook{'GetReportTest'},$self->test);
+        $next = $self->{CPANPREFS}->iterator('hash',$phrasebook{'GetReportTest'},$self->test);
     } elsif($mode ne 'daily') {
         my @authors = $self->{CPANPREFS}->get_query('hash',$phrasebook{'FindAuthorType'}, $report_type);
         return $self->_set_lastid()  unless(@authors);
         my $sql = sprintf $phrasebook{'GetReports2'}, join(',',map {"'$_->{pauseid}'"} @authors);
-        $next = $self->{CPANSTATS}->iterator('hash',$sql,$last_id);
+        $next = $self->{CPANPREFS}->iterator('hash',$sql,$last_id);
     } else {
         # find all reports since last update
-        $next = $self->{CPANSTATS}->iterator('hash',$phrasebook{'GetReports'},$last_id);
+        $next = $self->{CPANPREFS}->iterator('hash',$phrasebook{'GetReports'},$last_id);
         unless($next) {
             $self->_log( "INFO: STOP checking reports\n" );
             return;
@@ -399,7 +414,7 @@ sub check_reports {
 
         if($row->{version} && $prefs->{version} && $prefs->{version} ne 'ALL') {
             if($prefs->{version} eq 'LATEST') {
-                my @vers = $self->{CPANSTATS}->get_query('array',$phrasebook{'GetLatestDistVers'},$row->{dist});
+                my @vers = $self->{CPANPREFS}->get_query('array',$phrasebook{'GetLatestDistVers'},$row->{dist});
                 $self->_log( "DEBUG: dist prefs: vers=".(scalar(@vers))."\n" )                  if($self->verbose);
                 $self->_log( "DEBUG: dist prefs: version=$vers[0]->[0], $row->{version}\n" )    if($self->verbose);
                 next    if(@vers && $vers[0]->[0] ne $row->{version});
@@ -452,7 +467,7 @@ sub check_reports {
 
         # check whether only first instance required
         if($prefs->{tuple} eq 'FIRST') {
-            my @count = $self->{CPANSTATS}->get_query('array',$phrasebook{'GetReportCount'}, 
+            my @count = $self->{CPANPREFS}->get_query('array',$phrasebook{'GetReportCount'}, 
                 $row->{platform}, $row->{perl}, $row->{state}, $row->{id}, $row->{dist}, $row->{version});
             $self->_log( "DEBUG: dist prefs: tuple=FIRST, count=".(scalar(@count))."\n" )    if($self->verbose);
             next    if(@count > 0);
@@ -632,7 +647,7 @@ sub _set_lastid {
     my ($self,$id) = @_;
 
     if(!defined $id) {
-        my @lastid = $self->{CPANSTATS}->get_query('array',$phrasebook{'LastReport'});
+        my @lastid = $self->{CPANPREFS}->get_query('array',$phrasebook{'LastReport'});
         $id = @lastid ? $lastid[0]->[0] : 0;
     }
 
@@ -678,7 +693,7 @@ sub _get_earliest {
     }
 
     my $fulldate = sprintf "%04d%02d%02d000000", $date[5], $date[4], $date[3];
-    my @report = $self->{CPANSTATS}->get_query('array',$phrasebook{'GetEarliest'}, $fulldate);
+    my @report = $self->{CPANPREFS}->get_query('array',$phrasebook{'GetEarliest'}, $fulldate);
     return 0    unless(@report);
     return $report[0]->[0] || 0;
 }
@@ -689,7 +704,7 @@ sub _get_author {
     return  unless($dist && $vers);
 
     unless($AUTHORS{$dist} && $AUTHORS{$dist}{$vers}) {
-        my @author = $self->{CPANSTATS}->get_query('array',$phrasebook{'GetAuthor'}, $dist, $vers);
+        my @author = $self->{CPANPREFS}->get_query('array',$phrasebook{'GetAuthor'}, $dist, $vers);
         $AUTHORS{$dist}{$vers} = @author ? $author[0]->[0] : undef;
     }
     return $AUTHORS{$dist}{$vers};
@@ -788,7 +803,7 @@ sub _send_report {
     # old NNTP article lookup
     if($nntpid) {
         # get article
-        my @rows = $self->{ARTICLES}->get_query('hash',$phrasebook{'GetArticle'}, $nntpid);
+        my @rows = $self->{CPANPREFS}->get_query('hash',$phrasebook{'GetArticle'}, $nntpid);
 
         #$self->_log( "ARTICLE: $nntpid: $rows[0]->{article}\n" );
 
@@ -823,7 +838,7 @@ sub _send_report {
 
     # new Metabase lookup
     } else {
-        my @rows = $self->{CPANSTATS}->GetQuery('hash',$phrasebook{'GetMetabaseByGUID'},$row->{guid});
+        my @rows = $self->{CPANPREFS}->GetQuery('hash',$phrasebook{'GetMetabaseByGUID'},$row->{guid});
         return  unless(@rows);
 
         my $data = decode_json($rows[0]->{report});
@@ -840,7 +855,7 @@ sub _send_report {
         my $version = $distro->metadata->{dist_version};
         my $author  = $distro->metadata->{author};
 
-        my ($tester_name,$tester_email) = get_tester( $report->creator );
+        my ($tester_name,$tester_email) = $self->_get_tester( $report->creator );
 
         my $subject = sprintf "%s %s-%s %s %s", $state, $dist, $version, $perl, $osname;
 
@@ -936,6 +951,13 @@ sub _download_mailrc {
     my $p = Parse::CPAN::Authors->new($data);
     die "Cannot parse data from 01mailrc.txt"   unless($p);
     return $p;
+}
+
+sub _get_tester {
+    my ($self,$creator) = @_;
+
+    return  unless($creator && $self->{testers}{$creator});
+    return $self->{testers}{$creator}{name},$self->{testers}{$creator}{email};
 }
 
 sub _log {
@@ -1094,13 +1116,13 @@ Downloads and/or reads a copy of the 01mailrc.txt file.
 =head1 SEE ALSO
 
 L<CPAN::Testers::Data::Generator>
-L<CPAN::WWW::Testers>
 L<CPAN::Testers::WWW::Statistics>
 
-F<http://blog.cpantesters.org/>,
+F<http://prefs.cpantesters.org/>,
 F<http://www.cpantesters.org/>,
 F<http://stats.cpantesters.org/>,
-F<http://wiki.cpantesters.org/>
+F<http://wiki.cpantesters.org/>,
+F<http://blog.cpantesters.org/>
 
 =head1 BUGS, PATCHES & FIXES
 
@@ -1108,7 +1130,7 @@ There are no known bugs at the time of this release. However, if you spot a
 bug or are experiencing difficulties, that is not explained within the POD
 documentation, please send bug reports and patches to the RT Queue (see below).
 
-Fixes are dependant upon their severity and my availablity. Should a fix not
+Fixes are dependent upon their severity and my availability. Should a fix not
 be forthcoming, please feel free to (politely) remind me.
 
 RT Queue -
@@ -1121,9 +1143,9 @@ Miss Barbell Productions, L<http://www.missbarbell.co.uk/>
 
 =head1 COPYRIGHT & LICENSE
 
-  Copyright (C) 2008-2009 Barbie for Miss Barbell Productions.
+  Copyright (C) 2008-2012 Barbie for Miss Barbell Productions.
 
   This module is free software; you can redistribute it and/or
-  modify it under the same terms as Perl itself.
+  modify it under the Artistic License 2.0.
 
 =cut

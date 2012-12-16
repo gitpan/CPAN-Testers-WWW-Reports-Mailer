@@ -1,12 +1,23 @@
-#!perl
-
+#!perl -w
 use strict;
-use warnings;
+
 $|=1;
 
-use Test::More tests => 14;
-use lib 't';
-use lib qw(./lib ../lib);
+# -------------------------------------------------------------------
+# Library Modules
+
+use lib qw(t/lib);
+use Test::More;
+
+use CPAN::Testers::WWW::Reports::Mailer;
+
+use TestEnvironment;
+use TestObject;
+
+# -------------------------------------------------------------------
+# Variables
+
+my $TESTS = 14;
 
 my %COUNTS = (
     REPORTS => 10643,
@@ -22,8 +33,10 @@ my %COUNTS = (
     TEST    => 0
 );
 
-use CTWRM_Testing;
-use CPAN::Testers::WWW::Reports::Mailer;
+my @DATA = (
+    'auth|BARBIE|3|NULL',
+    'dist|BARBIE|-|0|3|NONE|FIRST|LATEST|1|ALL|ALL'
+);
 
 my %files = (
     'lastmail' => 't/_TMPDIR/test-lastmail.txt',
@@ -31,24 +44,34 @@ my %files = (
     'mailfile' => 'mailer-debug.log'
 );
 
+my $CONFIG = 't/_DBDIR/preferences-daily.ini';
+
+# -------------------------------------------------------------------
+# Tests
+
 for(keys %files) {
     unlink $files{$_}   if(-f $files{$_});
 }
 
-my ($pa,$pd) = CTWRM_Testing::prefs_db_init(\*DATA);
-is($pa,1,'author records added');
-is($pd,1,'distro records added');
+my $handles = TestEnvironment::Handles();
+if(!$handles)   { plan skip_all => "Unable to create test environment"; }
+else            { plan tests    => $TESTS }
 
-my $mailer = CPAN::Testers::WWW::Reports::Mailer->new(config => 't/data/preferences-daily.ini');
+SKIP: {
+    skip "No supported databases available", $TESTS  unless($handles->{CPANPREFS});
 
-$mailer->check_reports();
-$mailer->check_counts();
+    my ($pa,$pd) = TestEnvironment::ResetPrefs(\@DATA);
+    is($pa,1,'author records added');
+    is($pd,1,'distro records added');
 
-is($mailer->{counts}{$_},$COUNTS{$_},"Matched count for $_") for(keys %COUNTS);
+    my $mailer = TestObject->load(config => $CONFIG);
 
-ok(-f $files{mailfile} ? 0 : 1,'no mail files sent');
+    if($mailer->nomail) {
+        $mailer->check_reports();
+        $mailer->check_counts();
+    }
 
+    is($mailer->{counts}{$_},$COUNTS{$_},"Matched count for $_") for(keys %COUNTS);
 
-__DATA__
-auth|BARBIE|3|NULL
-dist|BARBIE|-|0|3|NONE|FIRST|LATEST|1|ALL|ALL
+    ok(-f $files{mailfile} ? 0 : 1,'no mail files sent');
+}
