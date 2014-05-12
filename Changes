@@ -1,4 +1,11 @@
-Revision history for Perl module CPAN::Testers::WWW::Reports::Mailer.
+Revision history for CPAN-Testers-WWW-Reports-Mailer
+====================================================
+
+0.31    2014-05-12
+        - fixed distribution name in META.
+        - added LICENSE file.
+        - updated license links.
+        - more thorough META tests.
 
 0.30    2012-12-31
         - fixed MANIFEST list.

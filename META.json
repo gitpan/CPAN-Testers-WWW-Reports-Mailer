@@ -1,6 +1,6 @@
 {
     "name": "CPAN-Testers-WWW-Reports-Mailer",
-    "version": "0.30",
+    "version": "0.31",
     "abstract": "CPAN Testers Reports Mailer",
     "author": [
         "Barbie (BARBIE) <barbie@cpan.org>"
@@ -67,7 +67,7 @@
     "provides": {
         "CPAN::Testers::WWW::Reports::Mailer": {
             "file": "lib/CPAN/Testers/WWW/Reports/Mailer.pm",
-            "version": "0.30"
+            "version": "0.31"
         }
     },
     "no_index": {
@@ -75,7 +75,7 @@
     },
 
     "resources": {
-        "license": "http://dev.perl.org/licenses/",
+        "license": "http://www.perlfoundation.org/artistic_license_2_0",
         "bugtracker": { "web": "http://rt.cpan.org/Public/Dist/Display.html?Name=CPAN-Testers-WWW-Reports-Mailer" },
         "repository": {
             "url": "git://github.com/barbie/cpan-testers-www-reports-mailer.git",
