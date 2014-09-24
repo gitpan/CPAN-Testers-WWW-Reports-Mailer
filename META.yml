@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:                     CPAN-Testers-WWW-Reports-Mailer
-version:                  0.32
+version:                  0.33
 abstract:                 CPAN Testers Reports Mailer
 author:
   - Barbie <barbie@cpan.org>
@@ -47,9 +47,10 @@ build_requires:
 provides:
   CPAN::Testers::WWW::Reports::Mailer:
     file:     lib/CPAN/Testers/WWW/Reports/Mailer.pm
-    version:  0.32
+    version:  0.33
 
 resources:
+  homepage:   http://devel.cpantesters.org
   license:    http://www.perlfoundation.org/artistic_license_2_0
   bugtracker: http://rt.cpan.org/Public/Dist/Display.html?Name=CPAN-Testers-WWW-Reports-Mailer
   repository: git://github.com/barbie/cpan-testers-www-reports-mailer.git
@@ -57,4 +58,4 @@ resources:
 meta-spec:
    version:   1.4
    url:       http://module-build.sourceforge.net/META-spec-v1.4.html
-generated_by: Hand 1.0
+generated_by: The Hand of Barbie 1.0
